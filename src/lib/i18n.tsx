@@ -189,7 +189,7 @@ const en = {
     'form.sourcePreviewAlt': 'Source preview {index}',
     'form.streamingSingleTooltip': 'Streaming is only supported when generating a single image (n=1).',
     'form.streamingTooltip':
-        'Shows partial preview images as they are generated, providing a more interactive experience.',
+        'Shows partial previews while generating. Streaming responses may not include a revised prompt; turn it off if you need that prompt.',
     'form.validation.invalidMaskType': 'Invalid file type. Please upload a PNG file for the mask.',
     'form.validation.maskDimensionMismatch':
         'Mask dimensions ({maskWidth}x{maskHeight}) must match the source image dimensions ({imageWidth}x{imageHeight}).',
@@ -326,6 +326,10 @@ const en = {
     'page.sendToEditError': 'Failed to send image to edit form.',
     'page.setPasswordDescription': 'Set a password to use for API requests.',
     'page.streamingError': 'Streaming error occurred',
+    'page.streamingInterrupted':
+        'The upstream streaming connection was interrupted before a final image was returned. Please retry, or turn off streaming preview.',
+    'page.upstreamConnectionError':
+        'The upstream image service is temporarily unavailable or the connection was interrupted. Please retry later.',
     'page.unauthorized': 'Unauthorized: Invalid or missing password. Please try again.',
     'page.unexpectedDeleteError': 'An unexpected error occurred during deletion.',
     'page.unexpectedError': 'An unexpected error occurred.',
@@ -518,7 +522,7 @@ const zh: Translations = {
     'form.sourceImages': '源图片 [最多：{maxImages}]',
     'form.sourcePreviewAlt': '源图片预览 {index}',
     'form.streamingSingleTooltip': '流式预览只支持生成单张图片（n=1）。',
-    'form.streamingTooltip': '生成过程中显示局部预览图，体验更即时。',
+    'form.streamingTooltip': '生成过程中显示局部预览图，体验更即时；流式响应可能不返回修订提示词，需要查看修订提示词时请关闭流式预览。',
     'form.validation.invalidMaskType': '文件类型无效。请上传 PNG 格式的蒙版文件。',
     'form.validation.maskDimensionMismatch':
         '蒙版尺寸（{maskWidth}x{maskHeight}）必须与源图片尺寸（{imageWidth}x{imageHeight}）一致。',
@@ -650,6 +654,8 @@ const zh: Translations = {
     'page.sendToEditError': '发送图片到编辑表单失败。',
     'page.setPasswordDescription': '设置用于 API 请求的密码。',
     'page.streamingError': '流式生成出错',
+    'page.streamingInterrupted': '上游流式连接在返回最终图片前中断了。请重试，或关闭流式预览后再生成。',
+    'page.upstreamConnectionError': '上游图片服务暂时不可用，或连接中途断开了。请稍后重试。',
     'page.unauthorized': '未授权：密码无效或缺失。请重试。',
     'page.unexpectedDeleteError': '删除过程中发生未知错误。',
     'page.unexpectedError': '发生未知错误。',
@@ -690,41 +696,67 @@ function interpolate(template: string, params?: TranslationParams): string {
 }
 
 const languageStorageKey = 'gptImageLanguage';
+const defaultLanguage: Language = 'zh';
+const defaultLanguagePreference: LanguagePreference = 'zh';
 
 function getBrowserLanguage(): Language {
-    if (typeof window === 'undefined') return 'en';
+    if (typeof window === 'undefined') return defaultLanguage;
 
     return window.navigator.language.toLowerCase().startsWith('zh') ? 'zh' : 'en';
 }
 
 function getStoredLanguagePreference(): LanguagePreference {
-    if (typeof window === 'undefined') return 'system';
+    if (typeof window === 'undefined') return defaultLanguagePreference;
 
     const storedLanguage = window.localStorage.getItem(languageStorageKey);
     if (storedLanguage === 'system' || storedLanguage === 'en' || storedLanguage === 'zh') {
         return storedLanguage;
     }
 
-    return 'system';
+    return defaultLanguagePreference;
 }
 
 export function I18nProvider({ children }: { children: React.ReactNode }) {
-    const [languagePreference, setLanguagePreferenceState] = React.useState<LanguagePreference>('system');
-    const [systemLanguage, setSystemLanguage] = React.useState<Language>('en');
+    const [languagePreference, setLanguagePreferenceState] =
+        React.useState<LanguagePreference>(defaultLanguagePreference);
+    const [systemLanguage, setSystemLanguage] = React.useState<Language>(defaultLanguage);
 
-    React.useEffect(() => {
+    const syncLanguageState = React.useCallback(() => {
         setSystemLanguage(getBrowserLanguage());
         setLanguagePreferenceState(getStoredLanguagePreference());
     }, []);
 
     React.useEffect(() => {
-        const handleLanguageChange = () => {
-            setSystemLanguage(getBrowserLanguage());
+        syncLanguageState();
+    }, [syncLanguageState]);
+
+    React.useEffect(() => {
+        const syncWhenVisible = () => {
+            if (!document.hidden) {
+                syncLanguageState();
+            }
         };
 
-        window.addEventListener('languagechange', handleLanguageChange);
-        return () => window.removeEventListener('languagechange', handleLanguageChange);
-    }, []);
+        const handleStorage = (event: StorageEvent) => {
+            if (event.key === languageStorageKey) {
+                syncLanguageState();
+            }
+        };
+
+        window.addEventListener('languagechange', syncLanguageState);
+        window.addEventListener('pageshow', syncLanguageState);
+        window.addEventListener('focus', syncLanguageState);
+        window.addEventListener('storage', handleStorage);
+        document.addEventListener('visibilitychange', syncWhenVisible);
+
+        return () => {
+            window.removeEventListener('languagechange', syncLanguageState);
+            window.removeEventListener('pageshow', syncLanguageState);
+            window.removeEventListener('focus', syncLanguageState);
+            window.removeEventListener('storage', handleStorage);
+            document.removeEventListener('visibilitychange', syncWhenVisible);
+        };
+    }, [syncLanguageState]);
 
     const language: Language = languagePreference === 'system' ? systemLanguage : languagePreference;
 

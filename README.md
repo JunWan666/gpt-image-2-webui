@@ -123,6 +123,21 @@ http://服务器IP:3000
 
 ### 生成图片自动清理
 
+Docker 镜像已内置生成图片自动清理。使用 Docker Compose 或 `docker run` 启动容器后，容器会默认开启一个后台清理循环：启动时先检测一次，之后每 24 小时检测一次，保留最近 3 天生成的图片。由于默认 Compose 会把 `./generated-images` 挂载到 `/app/generated-images`，清理的是宿主机持久化目录里的过期图片。
+
+可用环境变量调整 Docker 内置清理：
+
+```dotenv
+GENERATED_IMAGE_CLEANUP_ENABLED=true
+GENERATED_IMAGE_RETENTION_DAYS=3
+GENERATED_IMAGE_CLEANUP_INTERVAL_HOURS=24
+GENERATED_IMAGE_CLEANUP_RUN_ON_START=true
+GENERATED_IMAGE_CLEANUP_DRY_RUN=false
+GENERATED_IMAGE_CLEANUP_LOG_FILE=/app/logs/cleanup-generated-images.log
+```
+
+如果不希望容器自动清理，把 `GENERATED_IMAGE_CLEANUP_ENABLED=false` 写入 `.env` 后重启容器即可。
+
 仓库提供了清理脚本 `scripts/cleanup-generated-images.sh`，默认清理脚本所在项目目录下的 `generated-images`；按本文路径部署时就是 `/opt/gpt-image-2-webui/generated-images`。日志默认写入 `/var/log/gpt-image-2-webui/cleanup-generated-images.log`。脚本会根据文件名里的生成时间戳判断过期时间，例如 `1777474614523-0.jpeg`；`.png`、`.jpg`、`.jpeg`、`.webp` 之外或命名不匹配的文件会跳过并写入日志。
 
 在服务器上先给脚本执行权限：
@@ -162,6 +177,10 @@ OPENAI_API_BASE_URL=
 OPENAI_IMAGE_TIMEOUT_MS=1200000
 NEXT_PUBLIC_IMAGE_STORAGE_MODE=fs
 APP_PASSWORD=
+GENERATED_IMAGE_CLEANUP_ENABLED=true
+GENERATED_IMAGE_RETENTION_DAYS=3
+GENERATED_IMAGE_CLEANUP_INTERVAL_HOURS=24
+GENERATED_IMAGE_CLEANUP_RUN_ON_START=true
 ```
 
 然后启动：

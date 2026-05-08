@@ -100,6 +100,7 @@ type ImageBatchItem = {
     path: string;
     filename: string;
     revisedPrompt?: string;
+    isStreamingPreview?: boolean;
 };
 
 type ApiUsageForCost = Parameters<typeof calculateApiCost>[0];
@@ -209,6 +210,32 @@ function formatContentType(contentType?: string | null): string {
     return contentType?.split(';')[0] || '-';
 }
 
+function getServerImagePath(filename: string): string {
+    return `/api/image/${encodeURIComponent(filename)}`;
+}
+
+function isUpstreamConnectionErrorMessage(message: string): boolean {
+    const normalizedMessage = message.toLowerCase();
+    const signals = [
+        'status_code=502',
+        'status code 502',
+        '502',
+        'bad gateway',
+        'stream disconnected before completion',
+        'failed to fetch',
+        'failed fetch',
+        'fetch failed',
+        'terminated',
+        'und_err_socket',
+        'other side closed',
+        'socket hang up',
+        'econnreset',
+        'connection reset'
+    ];
+
+    return signals.some((signal) => normalizedMessage.includes(signal));
+}
+
 export default function HomePage() {
     const { language, languagePreference, setLanguagePreference, t } = useI18n();
     const { settings, modelOptions, saveSettings } = useAppSettings();
@@ -248,7 +275,6 @@ export default function HomePage() {
     const [dialogCheckboxStateSkipConfirm, setDialogCheckboxStateSkipConfirm] = React.useState<boolean>(false);
 
     const allDbImages = useLiveQuery<ImageRecord[] | undefined>(() => db.images.toArray(), []);
-    const isImageCacheReady = allDbImages !== undefined;
 
     const [editImageFiles, setEditImageFiles] = React.useState<File[]>([]);
     const [editSourceImagePreviewUrls, setEditSourceImagePreviewUrls] = React.useState<string[]>([]);
@@ -291,7 +317,6 @@ export default function HomePage() {
     const [genCompression, setGenCompression] = React.useState([100]);
     const [genBackground, setGenBackground] = React.useState<GenerationFormData['background']>('auto');
     const [genModeration, setGenModeration] = React.useState<GenerationFormData['moderation']>('auto');
-    const [genStreamEnabled, setGenStreamEnabled] = React.useState(false);
 
     const normalizeRevisedPrompt = React.useCallback((value: unknown): string | undefined => {
         return typeof value === 'string' && value.trim() ? value : undefined;
@@ -385,6 +410,7 @@ export default function HomePage() {
         try {
             const response = await fetch('/api/models', {
                 method: 'POST',
+                cache: 'no-store',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     apiKey: apiKeyDraft.trim() || undefined,
@@ -446,6 +472,12 @@ export default function HomePage() {
     const getImageSrc = React.useCallback(
         (filename: string): string | undefined => imageSrcByFilename[filename],
         [imageSrcByFilename]
+    );
+
+    const getStoredImageSrc = React.useCallback(
+        (filename: string, storageMode: 'fs' | 'indexeddb'): string | undefined =>
+            getImageSrc(filename) ?? (storageMode === 'fs' ? getServerImagePath(filename) : undefined),
+        [getImageSrc]
     );
 
     React.useEffect(() => {
@@ -887,6 +919,35 @@ export default function HomePage() {
                 const getOrderedStreamedImages = () =>
                     streamedImages.filter((image): image is ApiImageResponseItem => Boolean(image));
 
+                const displayStreamingPreview = (event: {
+                    b64_json?: string;
+                    index?: number;
+                    partial_image_index?: number;
+                }) => {
+                    if (!event.b64_json) return;
+
+                    const previewFormat =
+                        fallbackOutputFormat === 'jpeg' || fallbackOutputFormat === 'webp'
+                            ? fallbackOutputFormat
+                            : 'png';
+                    const previewIndex = typeof event.index === 'number' ? event.index : 0;
+                    const partialIndex =
+                        typeof event.partial_image_index === 'number'
+                            ? event.partial_image_index
+                            : streamingPartialImages;
+                    const previewPath = `data:${getMimeTypeFromFormat(previewFormat)};base64,${event.b64_json}`;
+
+                    setLatestImageBatch([
+                        {
+                            filename: `streaming-preview-${previewIndex}-${partialIndex}.${previewFormat}`,
+                            path: previewPath,
+                            isStreamingPreview: true
+                        }
+                    ]);
+                    setLatestBatchPrompt(historyPrompt);
+                    setImageOutputView(0);
+                };
+
                 const updateStreamingStats = () => {
                     setApiResponseInfo((current) =>
                         current
@@ -1045,12 +1106,26 @@ export default function HomePage() {
                                 const event = JSON.parse(jsonStr);
 
                                 if (event.type === 'partial_image') {
-                                    // Streaming previews are intentionally hidden in the UI.
                                     streamingPartialImages += 1;
+                                    displayStreamingPreview({
+                                        b64_json: event.b64_json,
+                                        index: event.index,
+                                        partial_image_index: event.partial_image_index
+                                    });
                                     updateStreamingStats();
                                     continue;
                                 } else if (event.type === 'error') {
-                                    throw new Error(event.error || t('page.streamingError'));
+                                    const streamingError = typeof event.error === 'string' ? event.error : '';
+                                    const streamingErrorText = streamingError.toLowerCase();
+                                    const wasStreamInterrupted =
+                                        event.error_code === 'stream_interrupted' ||
+                                        isUpstreamConnectionErrorMessage(streamingErrorText);
+
+                                    throw new Error(
+                                        wasStreamInterrupted
+                                            ? t('page.streamingInterrupted')
+                                            : streamingError || t('page.streamingError')
+                                    );
                                 } else if (event.type === 'completed') {
                                     const completedImage = normalizeStreamingImage({
                                         filename: event.filename,
@@ -1208,7 +1283,10 @@ export default function HomePage() {
         } catch (err: unknown) {
             durationMs = Date.now() - startTime;
             console.error(`API Call Error after ${durationMs}ms:`, err);
-            const errorMessage = err instanceof Error ? err.message : t('page.unexpectedError');
+            const rawErrorMessage = err instanceof Error ? err.message : '';
+            const errorMessage = isUpstreamConnectionErrorMessage(rawErrorMessage)
+                ? t('page.upstreamConnectionError')
+                : rawErrorMessage || t('page.unexpectedError');
             setError(errorMessage);
             setApiResponseInfo((current) =>
                 current
@@ -1233,9 +1311,7 @@ export default function HomePage() {
         (item: HistoryMetadata, imageIndex = 0) => {
             const selectedBatchPromises = item.images.map(async (imgInfo) => {
                 const originalStorageMode = item.storageModeUsed || 'fs';
-                const path =
-                    getImageSrc(imgInfo.filename) ??
-                    (originalStorageMode === 'fs' && isImageCacheReady ? `/api/image/${imgInfo.filename}` : undefined);
+                const path = getStoredImageSrc(imgInfo.filename, originalStorageMode);
 
                 if (path) {
                     return { path, filename: imgInfo.filename, revisedPrompt: imgInfo.revisedPrompt };
@@ -1266,7 +1342,7 @@ export default function HomePage() {
                 setImageOutputView(validImages.length > 0 ? Math.max(0, selectedValidIndex) : 'grid');
             });
         },
-        [getImageSrc, isImageCacheReady, t]
+        [getStoredImageSrc, t]
     );
 
     const handleClearHistory = React.useCallback(async () => {
@@ -1756,8 +1832,6 @@ export default function HomePage() {
                                 setBackground={setGenBackground}
                                 moderation={genModeration}
                                 setModeration={setGenModeration}
-                                streamEnabled={genStreamEnabled}
-                                setStreamEnabled={setGenStreamEnabled}
                             />
                         </div>
                         <div className={mode === 'edit' ? 'block h-full w-full' : 'hidden'}>
@@ -1897,8 +1971,7 @@ export default function HomePage() {
                             history={history}
                             onSelectImage={handleHistorySelect}
                             onClearHistory={handleClearHistory}
-                            getImageSrc={getImageSrc}
-                            isImageCacheReady={isImageCacheReady}
+                            getImageSrc={getStoredImageSrc}
                             onDeleteItemRequest={handleRequestDeleteItem}
                             itemPendingDeleteConfirmation={itemToDeleteConfirm}
                             onConfirmDeletion={handleConfirmDeletion}

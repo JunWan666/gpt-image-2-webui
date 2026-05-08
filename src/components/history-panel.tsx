@@ -31,14 +31,14 @@ import {
     Download
 } from 'lucide-react';
 import Image from 'next/image';
+import Link from 'next/link';
 import * as React from 'react';
 
 type HistoryPanelProps = {
     history: HistoryMetadata[];
     onSelectImage: (item: HistoryMetadata, imageIndex?: number) => void;
     onClearHistory: () => void;
-    getImageSrc: (filename: string) => string | undefined;
-    isImageCacheReady: boolean;
+    getImageSrc: (filename: string, storageMode: 'fs' | 'indexeddb') => string | undefined;
     onDeleteItemRequest: (item: HistoryMetadata) => void;
     itemPendingDeleteConfirmation: HistoryMetadata | null;
     onConfirmDeletion: () => void;
@@ -61,7 +61,6 @@ function HistoryPanelImpl({
     onSelectImage,
     onClearHistory,
     getImageSrc,
-    isImageCacheReady,
     onDeleteItemRequest,
     itemPendingDeleteConfirmation,
     onConfirmDeletion,
@@ -231,11 +230,7 @@ function HistoryPanelImpl({
                                 .map((imageInfo, index) => ({
                                     ...imageInfo,
                                     index,
-                                    src:
-                                        getImageSrc(imageInfo.filename) ??
-                                        (originalStorageMode === 'fs' && isImageCacheReady
-                                            ? `/api/image/${imageInfo.filename}`
-                                            : undefined)
+                                    src: getImageSrc(imageInfo.filename, originalStorageMode)
                                 }));
                             const firstPreview = imagePreviews[0];
                             const hiddenImageCount = Math.max(0, imageCount - imagePreviews.length);
@@ -361,7 +356,7 @@ function HistoryPanelImpl({
                                             variant='outline'
                                             size='sm'
                                             className='h-7 flex-1 border-white/20 px-2 py-1 text-xs text-white/70 hover:bg-white/10 hover:text-white'>
-                                            <a href={detailHref}>{t('history.showDetails')}</a>
+                                            <Link href={detailHref}>{t('history.showDetails')}</Link>
                                         </Button>
                                         {firstPreview?.src && firstImage && (
                                             <Button

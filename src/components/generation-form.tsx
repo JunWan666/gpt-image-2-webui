@@ -3,7 +3,6 @@
 import { ModeToggle } from '@/components/mode-toggle';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
@@ -79,8 +78,6 @@ type GenerationFormProps = {
     setBackground: React.Dispatch<React.SetStateAction<GenerationFormData['background']>>;
     moderation: GenerationFormData['moderation'];
     setModeration: React.Dispatch<React.SetStateAction<GenerationFormData['moderation']>>;
-    streamEnabled: boolean;
-    setStreamEnabled: React.Dispatch<React.SetStateAction<boolean>>;
 };
 
 const RadioItemWithIcon = ({
@@ -135,9 +132,7 @@ export function GenerationForm({
     background,
     setBackground,
     moderation,
-    setModeration,
-    streamEnabled,
-    setStreamEnabled
+    setModeration
 }: GenerationFormProps) {
     const { t } = useI18n();
     const showCompression = outputFormat === 'jpeg' || outputFormat === 'webp';
@@ -153,12 +148,6 @@ export function GenerationForm({
             setBackground('auto');
         }
     }, [isGptImage2, background, setBackground]);
-
-    React.useEffect(() => {
-        if (n[0] !== 1 && streamEnabled) {
-            setStreamEnabled(false);
-        }
-    }, [n, streamEnabled, setStreamEnabled]);
 
     const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
@@ -176,7 +165,7 @@ export function GenerationForm({
             background,
             moderation,
             model,
-            stream: streamEnabled && n[0] === 1,
+            stream: false,
             partialImages: 2
         };
         if (showCompression) {
@@ -246,24 +235,6 @@ export function GenerationForm({
                             disabled={isLoading}
                             className='mt-3 [&>button]:border-black [&>button]:bg-white [&>button]:ring-offset-black [&>span:first-child]:h-1 [&>span:first-child>span]:bg-white'
                         />
-                    </div>
-
-                    <div className='flex items-start gap-3 rounded-md border border-white/10 bg-white/5 p-3'>
-                        <Checkbox
-                            id='stream-enabled'
-                            checked={streamEnabled}
-                            onCheckedChange={(checked) => setStreamEnabled(checked === true)}
-                            disabled={isLoading || n[0] !== 1}
-                            className='mt-0.5 border-white/40 data-[state=checked]:border-white data-[state=checked]:bg-white data-[state=checked]:text-black'
-                        />
-                        <div className='space-y-1'>
-                            <Label htmlFor='stream-enabled' className='cursor-pointer text-sm text-white'>
-                                {t('form.enableStreaming')}
-                            </Label>
-                            <p className='text-xs text-white/50'>
-                                {n[0] === 1 ? t('form.streamingTooltip') : t('form.streamingSingleTooltip')}
-                            </p>
-                        </div>
                     </div>
 
                     <div className='space-y-3'>

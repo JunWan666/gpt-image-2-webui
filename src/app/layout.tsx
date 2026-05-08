@@ -32,7 +32,7 @@ export default function RootLayout({
     children: React.ReactNode;
 }>) {
     return (
-        <html lang='en' translate='no' className='notranslate' suppressHydrationWarning>
+        <html lang='zh-CN' translate='no' className='notranslate' suppressHydrationWarning>
             <body translate='no' className={`${geistSans.variable} ${geistMono.variable} notranslate antialiased`}>
                 <ThemeProvider attribute='class' defaultTheme='dark' enableSystem disableTransitionOnChange>
                     <I18nProvider>

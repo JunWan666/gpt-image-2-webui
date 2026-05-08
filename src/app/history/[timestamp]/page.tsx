@@ -104,6 +104,16 @@ export default function HistoryDetailPage() {
     }, [allDbImages, item]);
 
     const handleBack = () => {
+        try {
+            const referrer = document.referrer ? new URL(document.referrer) : null;
+            if (referrer?.origin === window.location.origin) {
+                router.back();
+                return;
+            }
+        } catch {
+            // Fall back to the home page when the referrer is unavailable or malformed.
+        }
+
         router.push('/');
     };
 

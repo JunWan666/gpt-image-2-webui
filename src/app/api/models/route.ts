@@ -8,6 +8,10 @@ type ModelsRequestBody = {
     passwordHash?: string;
 };
 
+const noStoreHeaders = {
+    'Cache-Control': 'no-store, max-age=0'
+};
+
 function sha256(data: string): string {
     return crypto.createHash('sha256').update(data).digest('hex');
 }
@@ -38,12 +42,18 @@ export async function POST(request: NextRequest) {
 
     if (process.env.APP_PASSWORD) {
         if (!body.passwordHash) {
-            return NextResponse.json({ error: 'Unauthorized: Missing password hash.' }, { status: 401 });
+            return NextResponse.json(
+                { error: 'Unauthorized: Missing password hash.' },
+                { status: 401, headers: noStoreHeaders }
+            );
         }
 
         const serverPasswordHash = sha256(process.env.APP_PASSWORD);
         if (body.passwordHash !== serverPasswordHash) {
-            return NextResponse.json({ error: 'Unauthorized: Invalid password.' }, { status: 401 });
+            return NextResponse.json(
+                { error: 'Unauthorized: Invalid password.' },
+                { status: 401, headers: noStoreHeaders }
+            );
         }
     }
 
@@ -51,7 +61,10 @@ export async function POST(request: NextRequest) {
     const baseURL = body.baseUrl?.trim() || process.env.OPENAI_API_BASE_URL?.trim();
 
     if (!apiKey) {
-        return NextResponse.json({ error: 'API key not found. Add one or configure OPENAI_API_KEY.' }, { status: 400 });
+        return NextResponse.json(
+            { error: 'API key not found. Add one or configure OPENAI_API_KEY.' },
+            { status: 400, headers: noStoreHeaders }
+        );
     }
 
     try {
@@ -64,7 +77,7 @@ export async function POST(request: NextRequest) {
         const response = await openai.models.list();
         const models = normalizeModelIds(response.data.map((model) => model.id));
 
-        return NextResponse.json({ models });
+        return NextResponse.json({ models }, { headers: noStoreHeaders });
     } catch (error: unknown) {
         let errorMessage = 'Failed to fetch models.';
         let status = 500;
@@ -76,6 +89,6 @@ export async function POST(request: NextRequest) {
             }
         }
 
-        return NextResponse.json({ error: errorMessage }, { status });
+        return NextResponse.json({ error: errorMessage }, { status, headers: noStoreHeaders });
     }
 }

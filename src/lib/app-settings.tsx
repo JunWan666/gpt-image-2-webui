@@ -99,8 +99,27 @@ export function AppSettingsProvider({ children }: { children: React.ReactNode })
             }
         };
 
+        const syncSettings = () => {
+            setSettings(loadSettings());
+        };
+
+        const syncWhenVisible = () => {
+            if (!document.hidden) {
+                syncSettings();
+            }
+        };
+
         window.addEventListener('storage', handleStorage);
-        return () => window.removeEventListener('storage', handleStorage);
+        window.addEventListener('pageshow', syncSettings);
+        window.addEventListener('focus', syncSettings);
+        document.addEventListener('visibilitychange', syncWhenVisible);
+
+        return () => {
+            window.removeEventListener('storage', handleStorage);
+            window.removeEventListener('pageshow', syncSettings);
+            window.removeEventListener('focus', syncSettings);
+            document.removeEventListener('visibilitychange', syncWhenVisible);
+        };
     }, []);
 
     const saveSettings = React.useCallback((nextSettings: AppSettings) => {

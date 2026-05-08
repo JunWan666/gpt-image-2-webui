@@ -12,6 +12,7 @@ type ImageInfo = {
     path: string;
     filename: string;
     revisedPrompt?: string;
+    isStreamingPreview?: boolean;
 };
 
 type ImageOutputProps = {
@@ -67,8 +68,8 @@ export function ImageOutput({
         activePromptKind === 'revised' ? t('output.revisedPromptTitle') : t('output.originalPromptTitle');
 
     React.useEffect(() => {
-        setPromptView('original');
-    }, [selectedImage?.filename, promptText]);
+        setPromptView(selectedImage?.revisedPrompt?.trim() ? 'revised' : 'original');
+    }, [selectedImage?.filename, selectedImage?.revisedPrompt, promptText]);
 
     const handleSendClick = () => {
         // Send to edit only works when a single image is selected
@@ -95,6 +96,7 @@ export function ImageOutput({
     const canSendToEdit = !isLoading && isSingleImageView && imageBatch && imageBatch[viewMode];
     const singleActionClass = showCarousel && viewMode === 'grid' ? 'invisible' : 'visible';
     const selectedIndex = typeof viewMode === 'number' ? viewMode : 0;
+    const hasPreviewWhileLoading = Boolean(isLoading && imageBatch?.length);
 
     const goToPreviousImage = () => {
         if (!imageBatch?.length) return;
@@ -116,7 +118,7 @@ export function ImageOutput({
                 }}
             />
             <div className='relative flex h-full w-full flex-grow items-center justify-center overflow-hidden'>
-                {isLoading ? (
+                {isLoading && !hasPreviewWhileLoading ? (
                     currentMode === 'edit' && baseImagePreviewUrl ? (
                         <div className='relative flex h-full w-full items-center justify-center'>
                             <Image
@@ -141,44 +143,53 @@ export function ImageOutput({
                         </div>
                     )
                 ) : imageBatch && imageBatch.length > 0 ? (
-                    viewMode === 'grid' ? (
-                        <div
-                            className={`grid ${getGridColsClass(imageBatch.length)} max-h-full w-full max-w-full gap-1 p-1`}>
-                            {imageBatch.map((img, index) => (
-                                <div
-                                    key={img.filename}
-                                    className='relative aspect-square overflow-hidden rounded border border-white/10'>
-                                    <button
-                                        type='button'
-                                        className='relative h-full w-full cursor-zoom-in'
-                                        onClick={() => openPreview(img, index)}
-                                        aria-label={t('output.previewImageAria', { filename: img.filename })}>
-                                        <Image
-                                            src={img.path}
-                                            alt={t('output.generatedGridAlt', { index: index + 1 })}
-                                            fill
-                                            style={{ objectFit: 'contain' }}
-                                            sizes='(max-width: 768px) 50vw, (max-width: 1024px) 33vw, 25vw'
-                                            unoptimized
-                                        />
-                                    </button>
-                                    <Button
-                                        asChild
-                                        variant='ghost'
-                                        size='icon'
-                                        className='absolute right-1 bottom-1 z-10 h-7 w-7 rounded-full bg-black/70 text-white/80 hover:bg-black/90 hover:text-white'>
-                                        <a
-                                            href={img.path}
-                                            download={img.filename}
-                                            onClick={(event) => event.stopPropagation()}
-                                            aria-label={t('output.downloadImageAria', { filename: img.filename })}>
-                                            <Download className='h-4 w-4' />
-                                        </a>
-                                    </Button>
-                                </div>
-                            ))}
-                        </div>
-                    ) : imageBatch[viewMode] ? (
+                    <>
+                        {viewMode === 'grid' ? (
+                            <div
+                                className={`grid ${getGridColsClass(imageBatch.length)} max-h-full w-full max-w-full gap-1 p-1`}>
+                                {imageBatch.map((img, index) => (
+                                    <div
+                                        key={img.filename}
+                                        className='relative aspect-square overflow-hidden rounded border border-white/10'>
+                                        <button
+                                            type='button'
+                                            className='relative h-full w-full cursor-zoom-in'
+                                            onClick={() => openPreview(img, index)}
+                                            aria-label={t('output.previewImageAria', { filename: img.filename })}>
+                                            <Image
+                                                src={img.path}
+                                                alt={
+                                                    img.isStreamingPreview
+                                                        ? t('output.streamingPreviewAlt')
+                                                        : t('output.generatedGridAlt', { index: index + 1 })
+                                                }
+                                                fill
+                                                style={{ objectFit: 'contain' }}
+                                                sizes='(max-width: 768px) 50vw, (max-width: 1024px) 33vw, 25vw'
+                                                unoptimized
+                                            />
+                                        </button>
+                                        {!img.isStreamingPreview && (
+                                            <Button
+                                                asChild
+                                                variant='ghost'
+                                                size='icon'
+                                                className='absolute right-1 bottom-1 z-10 h-7 w-7 rounded-full bg-black/70 text-white/80 hover:bg-black/90 hover:text-white'>
+                                                <a
+                                                    href={img.path}
+                                                    download={img.filename}
+                                                    onClick={(event) => event.stopPropagation()}
+                                                    aria-label={t('output.downloadImageAria', {
+                                                        filename: img.filename
+                                                    })}>
+                                                    <Download className='h-4 w-4' />
+                                                </a>
+                                            </Button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : imageBatch[viewMode] ? (
                         <>
                             <button
                                 type='button'
@@ -187,7 +198,11 @@ export function ImageOutput({
                                 aria-label={t('output.previewImageAria', { filename: imageBatch[viewMode].filename })}>
                                 <Image
                                     src={imageBatch[viewMode].path}
-                                    alt={altText}
+                                    alt={
+                                        imageBatch[viewMode].isStreamingPreview
+                                            ? t('output.streamingPreviewAlt')
+                                            : altText
+                                    }
                                     width={512}
                                     height={512}
                                     className='max-h-full max-w-full object-contain'
@@ -220,11 +235,19 @@ export function ImageOutput({
                                 </>
                             )}
                         </>
-                    ) : (
-                        <div className='text-center text-white/40'>
-                            <p>{t('output.displayError')}</p>
-                        </div>
-                    )
+                        ) : (
+                            <div className='text-center text-white/40'>
+                                <p>{t('output.displayError')}</p>
+                            </div>
+                        )}
+                        {hasPreviewWhileLoading && (
+                            <div className='absolute top-2 left-2 flex items-center gap-2 rounded-full border border-white/15 bg-black/75 px-3 py-1.5 text-xs text-white/80 shadow-lg'>
+                                <Loader2 className='h-3.5 w-3.5 animate-spin' />
+                                <span>{t('output.streaming')}</span>
+                                <span className='text-white/45'>{elapsedLabel}</span>
+                            </div>
+                        )}
+                    </>
                 ) : (
                     <div className='text-center text-white/40'>
                         <p>{t('output.empty')}</p>

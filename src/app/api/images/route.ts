@@ -7,6 +7,7 @@ import path from 'path';
 // Streaming event types
 type StreamingEvent = {
     type: 'partial_image' | 'completed' | 'error' | 'done';
+    error_code?: 'stream_interrupted';
     index?: number;
     partial_image_index?: number;
     b64_json?: string;
@@ -25,8 +26,237 @@ type StreamingEvent = {
     error?: string;
 };
 
+type StreamingImageResult = NonNullable<StreamingEvent['images']>[number];
+type ImageStorageMode = 'fs' | 'indexeddb';
+
 const outputDir = path.resolve(process.cwd(), 'generated-images');
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = 20 * 60 * 1000;
+
+function enqueueStreamingEvent(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    encoder: TextEncoder,
+    event: StreamingEvent
+): boolean {
+    try {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        return true;
+    } catch (error) {
+        console.warn('Unable to enqueue streaming event:', error);
+        return false;
+    }
+}
+
+function closeStreamingController(controller: ReadableStreamDefaultController<Uint8Array>) {
+    try {
+        controller.close();
+    } catch (error) {
+        console.warn('Unable to close streaming response:', error);
+    }
+}
+
+function getErrorDetailText(error: unknown): string {
+    const details: string[] = [];
+    const seen = new Set<object>();
+    const add = (value: unknown) => {
+        if (value === undefined || value === null) return;
+        const text = String(value).trim();
+        if (text) details.push(text);
+    };
+    const visit = (value: unknown) => {
+        if (value === undefined || value === null) return;
+        if (typeof value !== 'object') {
+            add(value);
+            return;
+        }
+        if (seen.has(value)) return;
+        seen.add(value);
+
+        const record = value as Record<string, unknown>;
+        if (value instanceof Error) {
+            add(value.name);
+            add(value.message);
+        }
+
+        for (const key of ['code', 'type', 'name', 'message', 'status', 'status_code', 'statusCode']) {
+            add(record[key]);
+        }
+
+        if ('cause' in record) {
+            visit(record.cause);
+        }
+        if ('error' in record) {
+            visit(record.error);
+        }
+        if ('response' in record) {
+            visit(record.response);
+        }
+    };
+
+    visit(error);
+    return [...new Set(details)].join(' ');
+}
+
+function getErrorStatusCode(error: unknown): number | undefined {
+    const seen = new Set<object>();
+    const visit = (value: unknown): number | undefined => {
+        if (!value || typeof value !== 'object') return undefined;
+        if (seen.has(value)) return undefined;
+        seen.add(value);
+
+        const record = value as Record<string, unknown>;
+        for (const key of ['status', 'status_code', 'statusCode']) {
+            const status = record[key];
+            if (typeof status === 'number' && Number.isFinite(status)) {
+                return status;
+            }
+            if (typeof status === 'string') {
+                const parsedStatus = Number.parseInt(status, 10);
+                if (Number.isFinite(parsedStatus)) {
+                    return parsedStatus;
+                }
+            }
+        }
+
+        return visit(record.cause) ?? visit(record.error) ?? visit(record.response);
+    };
+
+    return visit(error);
+}
+
+function isInterruptedStreamingError(error: unknown): boolean {
+    const errorText = getErrorDetailText(error).toLowerCase();
+    const interruptedSignals = [
+        'terminated',
+        'und_err_socket',
+        'other side closed',
+        'stream disconnected before completion',
+        'socket hang up',
+        'econnreset',
+        'connection reset',
+        'aborted',
+        'failed to fetch',
+        'fetch failed',
+        'failed fetch',
+        'body timeout'
+    ];
+
+    return interruptedSignals.some((signal) => errorText.includes(signal));
+}
+
+function isUpstreamConnectivityError(error: unknown): boolean {
+    const statusCode = getErrorStatusCode(error);
+    const errorText = getErrorDetailText(error).toLowerCase();
+
+    return (
+        statusCode === 502 ||
+        isInterruptedStreamingError(error) ||
+        errorText.includes('bad gateway') ||
+        errorText.includes('status_code=502') ||
+        errorText.includes('status_code: 502') ||
+        errorText.includes('status code 502') ||
+        /(^|[^0-9])502([^0-9]|$)/.test(errorText)
+    );
+}
+
+function getUpstreamConnectivityErrorMessage(responseLanguage: FormDataEntryValue | null): string {
+    return responseLanguage === 'en'
+        ? 'The upstream image service is temporarily unavailable or the connection was interrupted. Please retry later.'
+        : '上游图片服务暂时不可用，或连接中途断开了。请稍后重试。';
+}
+
+function getStreamingErrorMessage(error: unknown, responseLanguage: FormDataEntryValue | null): string {
+    const isEnglish = responseLanguage === 'en';
+
+    if (isUpstreamConnectivityError(error)) {
+        return isEnglish
+            ? 'The upstream streaming connection was interrupted before a final image was returned. Please retry, or turn off streaming preview.'
+            : '上游流式连接在返回最终图片前中断了。请重试，或关闭流式预览后再生成。';
+    }
+
+    const message = error instanceof Error && error.message ? error.message : getErrorDetailText(error);
+
+    return message || (isEnglish ? 'Streaming error occurred' : '流式生成出错');
+}
+
+function getImageApiErrorMessage(error: unknown, responseLanguage: FormDataEntryValue | null): string {
+    if (isUpstreamConnectivityError(error)) {
+        return getUpstreamConnectivityErrorMessage(responseLanguage);
+    }
+
+    const isEnglish = responseLanguage === 'en';
+    const message = error instanceof Error && error.message ? error.message : getErrorDetailText(error);
+
+    return message || (isEnglish ? 'An unexpected error occurred.' : '发生未知错误。');
+}
+
+async function emitLastPartialImageAsCompleted({
+    controller,
+    encoder,
+    completedImages,
+    lastPartialB64Json,
+    timestamp,
+    fileExtension,
+    shouldInlineImageData,
+    effectiveStorageMode,
+    logPrefix
+}: {
+    controller: ReadableStreamDefaultController<Uint8Array>;
+    encoder: TextEncoder;
+    completedImages: StreamingImageResult[];
+    lastPartialB64Json: string | undefined;
+    timestamp: number;
+    fileExtension: string;
+    shouldInlineImageData: boolean;
+    effectiveStorageMode: ImageStorageMode;
+    logPrefix: string;
+}): Promise<boolean> {
+    if (completedImages.length > 0 || !lastPartialB64Json) {
+        return false;
+    }
+
+    const filename = `${timestamp}-0.${fileExtension}`;
+    if (effectiveStorageMode === 'fs') {
+        const buffer = Buffer.from(lastPartialB64Json, 'base64');
+        const filepath = path.join(outputDir, filename);
+        await fs.writeFile(filepath, buffer);
+    }
+
+    const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
+    completedImages.push({
+        filename,
+        output_format: fileExtension,
+        ...(shouldInlineImageData ? { b64_json: lastPartialB64Json } : {}),
+        ...(savedPath ? { path: savedPath } : {})
+    });
+    console.warn(`${logPrefix}: No completed event received; using the last partial image.`);
+
+    const fallbackEvent: StreamingEvent = {
+        type: 'completed',
+        index: 0,
+        filename,
+        b64_json: shouldInlineImageData ? lastPartialB64Json : undefined,
+        path: savedPath,
+        output_format: fileExtension
+    };
+    enqueueStreamingEvent(controller, encoder, fallbackEvent);
+
+    return true;
+}
+
+function enqueueStreamingDone(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    encoder: TextEncoder,
+    completedImages: StreamingImageResult[],
+    finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined
+) {
+    const doneEvent: StreamingEvent = {
+        type: 'done',
+        images: completedImages,
+        revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
+        usage: finalUsage
+    };
+    enqueueStreamingEvent(controller, encoder, doneEvent);
+}
 
 function getImageRequestTimeoutMs() {
     const configuredTimeout = Number.parseInt(process.env.OPENAI_IMAGE_TIMEOUT_MS || '', 10);
@@ -276,9 +506,10 @@ function sha256(data: string): string {
 
 export async function POST(request: NextRequest) {
     console.log('Received POST request to /api/images');
+    let responseLanguageForError: FormDataEntryValue | null = null;
 
     try {
-        let effectiveStorageMode: 'fs' | 'indexeddb';
+        let effectiveStorageMode: ImageStorageMode;
         const explicitMode = process.env.NEXT_PUBLIC_IMAGE_STORAGE_MODE;
         const isOnVercel = process.env.VERCEL === '1';
 
@@ -317,6 +548,7 @@ export async function POST(request: NextRequest) {
         const localApiKey = (formData.get('apiKey') as string | null)?.trim();
         const localBaseUrl = (formData.get('baseUrl') as string | null)?.trim();
         const responseLanguage = formData.get('responseLanguage');
+        responseLanguageForError = responseLanguage;
         const acceptLanguage = getPreferredAcceptLanguage(responseLanguage, request);
         const apiKey = localApiKey || process.env.OPENAI_API_KEY;
         const baseURL = localBaseUrl || process.env.OPENAI_API_BASE_URL?.trim();
@@ -413,20 +645,14 @@ export async function POST(request: NextRequest) {
                 const fileExtension = validateOutputFormat(output_format);
                 const shouldInlineImageData = effectiveStorageMode !== 'fs';
 
-                const readableStream = new ReadableStream({
+                const readableStream = new ReadableStream<Uint8Array>({
                     async start(controller) {
-                        try {
-                            const completedImages: Array<{
-                                filename: string;
-                                b64_json?: string;
-                                path?: string;
-                                output_format: string;
-                                revised_prompt?: string;
-                            }> = [];
-                            let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
-                            let imageIndex = 0;
-                            let lastPartialB64Json: string | undefined;
+                        const completedImages: StreamingImageResult[] = [];
+                        let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
+                        let imageIndex = 0;
+                        let lastPartialB64Json: string | undefined;
 
+                        try {
                             for await (const event of stream) {
                                 const eventType = getStreamEventType(event);
                                 const b64Json = getStreamEventB64Json(event);
@@ -494,51 +720,54 @@ export async function POST(request: NextRequest) {
                                 }
                             }
 
-                            if (completedImages.length === 0 && lastPartialB64Json) {
-                                const filename = `${timestamp}-0.${fileExtension}`;
-                                if (effectiveStorageMode === 'fs') {
-                                    const buffer = Buffer.from(lastPartialB64Json, 'base64');
-                                    const filepath = path.join(outputDir, filename);
-                                    await fs.writeFile(filepath, buffer);
-                                }
-
-                                const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
-                                completedImages.push({
-                                    filename,
-                                    output_format: fileExtension,
-                                    ...(shouldInlineImageData ? { b64_json: lastPartialB64Json } : {}),
-                                    ...(savedPath ? { path: savedPath } : {})
-                                });
-                                console.warn('Streaming: No completed event received; using the last partial image.');
-
-                                const fallbackEvent: StreamingEvent = {
-                                    type: 'completed',
-                                    index: 0,
-                                    filename,
-                                    b64_json: shouldInlineImageData ? lastPartialB64Json : undefined,
-                                    path: savedPath,
-                                    output_format: fileExtension
-                                };
-                                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallbackEvent)}\n\n`));
-                            }
+                            await emitLastPartialImageAsCompleted({
+                                controller,
+                                encoder,
+                                completedImages,
+                                lastPartialB64Json,
+                                timestamp,
+                                fileExtension,
+                                shouldInlineImageData,
+                                effectiveStorageMode,
+                                logPrefix: 'Streaming'
+                            });
 
                             // Send final done event with all images and usage
-                            const doneEvent: StreamingEvent = {
-                                type: 'done',
-                                images: completedImages,
-                                revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
-                                usage: finalUsage
-                            };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
-                            controller.close();
+                            enqueueStreamingDone(controller, encoder, completedImages, finalUsage);
+                            closeStreamingController(controller);
                         } catch (error) {
                             console.error('Streaming error:', error);
+                            try {
+                                await emitLastPartialImageAsCompleted({
+                                    controller,
+                                    encoder,
+                                    completedImages,
+                                    lastPartialB64Json,
+                                    timestamp,
+                                    fileExtension,
+                                    shouldInlineImageData,
+                                    effectiveStorageMode,
+                                    logPrefix: 'Streaming interrupted'
+                                });
+                            } catch (fallbackError) {
+                                console.error('Streaming fallback image save failed:', fallbackError);
+                            }
+
+                            if (completedImages.length > 0) {
+                                console.warn('Streaming: Upstream interrupted after image data was received; finishing with available images.');
+                                enqueueStreamingDone(controller, encoder, completedImages, finalUsage);
+                                closeStreamingController(controller);
+                                return;
+                            }
+
+                            const interrupted = isUpstreamConnectivityError(error);
                             const errorEvent: StreamingEvent = {
                                 type: 'error',
-                                error: error instanceof Error ? error.message : 'Streaming error occurred'
+                                ...(interrupted ? { error_code: 'stream_interrupted' as const } : {}),
+                                error: getStreamingErrorMessage(error, responseLanguage)
                             };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
-                            controller.close();
+                            enqueueStreamingEvent(controller, encoder, errorEvent);
+                            closeStreamingController(controller);
                         }
                     }
                 });
@@ -610,20 +839,14 @@ export async function POST(request: NextRequest) {
                 const fileExtension = 'png'; // Edit mode always outputs PNG
                 const shouldInlineImageData = effectiveStorageMode !== 'fs';
 
-                const readableStream = new ReadableStream({
+                const readableStream = new ReadableStream<Uint8Array>({
                     async start(controller) {
-                        try {
-                            const completedImages: Array<{
-                                filename: string;
-                                b64_json?: string;
-                                path?: string;
-                                output_format: string;
-                                revised_prompt?: string;
-                            }> = [];
-                            let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
-                            let imageIndex = 0;
-                            let lastPartialB64Json: string | undefined;
+                        const completedImages: StreamingImageResult[] = [];
+                        let finalUsage: OpenAI.Images.ImagesResponse['usage'] | undefined;
+                        let imageIndex = 0;
+                        let lastPartialB64Json: string | undefined;
 
+                        try {
                             for await (const event of stream) {
                                 const eventType = getStreamEventType(event);
                                 const b64Json = getStreamEventB64Json(event);
@@ -691,51 +914,54 @@ export async function POST(request: NextRequest) {
                                 }
                             }
 
-                            if (completedImages.length === 0 && lastPartialB64Json) {
-                                const filename = `${timestamp}-0.${fileExtension}`;
-                                if (effectiveStorageMode === 'fs') {
-                                    const buffer = Buffer.from(lastPartialB64Json, 'base64');
-                                    const filepath = path.join(outputDir, filename);
-                                    await fs.writeFile(filepath, buffer);
-                                }
-
-                                const savedPath = effectiveStorageMode === 'fs' ? `/api/image/${filename}` : undefined;
-                                completedImages.push({
-                                    filename,
-                                    output_format: fileExtension,
-                                    ...(shouldInlineImageData ? { b64_json: lastPartialB64Json } : {}),
-                                    ...(savedPath ? { path: savedPath } : {})
-                                });
-                                console.warn('Streaming edit: No completed event received; using the last partial image.');
-
-                                const fallbackEvent: StreamingEvent = {
-                                    type: 'completed',
-                                    index: 0,
-                                    filename,
-                                    b64_json: shouldInlineImageData ? lastPartialB64Json : undefined,
-                                    path: savedPath,
-                                    output_format: fileExtension
-                                };
-                                controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallbackEvent)}\n\n`));
-                            }
+                            await emitLastPartialImageAsCompleted({
+                                controller,
+                                encoder,
+                                completedImages,
+                                lastPartialB64Json,
+                                timestamp,
+                                fileExtension,
+                                shouldInlineImageData,
+                                effectiveStorageMode,
+                                logPrefix: 'Streaming edit'
+                            });
 
                             // Send final done event with all images and usage
-                            const doneEvent: StreamingEvent = {
-                                type: 'done',
-                                images: completedImages,
-                                revised_prompt: completedImages.find((image) => image.revised_prompt)?.revised_prompt,
-                                usage: finalUsage
-                            };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvent)}\n\n`));
-                            controller.close();
+                            enqueueStreamingDone(controller, encoder, completedImages, finalUsage);
+                            closeStreamingController(controller);
                         } catch (error) {
                             console.error('Streaming edit error:', error);
+                            try {
+                                await emitLastPartialImageAsCompleted({
+                                    controller,
+                                    encoder,
+                                    completedImages,
+                                    lastPartialB64Json,
+                                    timestamp,
+                                    fileExtension,
+                                    shouldInlineImageData,
+                                    effectiveStorageMode,
+                                    logPrefix: 'Streaming edit interrupted'
+                                });
+                            } catch (fallbackError) {
+                                console.error('Streaming edit fallback image save failed:', fallbackError);
+                            }
+
+                            if (completedImages.length > 0) {
+                                console.warn('Streaming edit: Upstream interrupted after image data was received; finishing with available images.');
+                                enqueueStreamingDone(controller, encoder, completedImages, finalUsage);
+                                closeStreamingController(controller);
+                                return;
+                            }
+
+                            const interrupted = isUpstreamConnectivityError(error);
                             const errorEvent: StreamingEvent = {
                                 type: 'error',
-                                error: error instanceof Error ? error.message : 'Streaming error occurred'
+                                ...(interrupted ? { error_code: 'stream_interrupted' as const } : {}),
+                                error: getStreamingErrorMessage(error, responseLanguage)
                             };
-                            controller.enqueue(encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`));
-                            controller.close();
+                            enqueueStreamingEvent(controller, encoder, errorEvent);
+                            closeStreamingController(controller);
                         }
                     }
                 });
@@ -826,22 +1052,8 @@ export async function POST(request: NextRequest) {
     } catch (error: unknown) {
         console.error('Error in /api/images:', error);
 
-        let errorMessage = 'An unexpected error occurred.';
-        let status = 500;
-
-        if (error instanceof Error) {
-            errorMessage = error.message;
-            if (typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number') {
-                status = error.status;
-            }
-        } else if (typeof error === 'object' && error !== null) {
-            if ('message' in error && typeof error.message === 'string') {
-                errorMessage = error.message;
-            }
-            if ('status' in error && typeof error.status === 'number') {
-                status = error.status;
-            }
-        }
+        const errorMessage = getImageApiErrorMessage(error, responseLanguageForError);
+        const status = getErrorStatusCode(error) ?? 500;
 
         return NextResponse.json({ error: errorMessage }, { status });
     }

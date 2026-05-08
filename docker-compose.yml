@@ -1,6 +1,6 @@
 services:
   gpt-image-2-webui:
-    image: tannic666/gpt-image-2-webui:latest
+    image: tannic666/gpt-image-2-webui:${DOCKER_IMAGE_TAG:-latest}
     container_name: gpt-image-2-webui
     restart: unless-stopped
     ports:
@@ -9,11 +9,13 @@ services:
       NODE_ENV: production
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-}
+      OPENAI_IMAGE_TIMEOUT_MS: ${OPENAI_IMAGE_TIMEOUT_MS:-1200000}
       NEXT_PUBLIC_IMAGE_STORAGE_MODE: ${NEXT_PUBLIC_IMAGE_STORAGE_MODE:-fs}
       APP_PASSWORD: ${APP_PASSWORD:-}
       GENERATED_IMAGE_CLEANUP_ENABLED: ${GENERATED_IMAGE_CLEANUP_ENABLED:-true}
       GENERATED_IMAGE_RETENTION_DAYS: ${GENERATED_IMAGE_RETENTION_DAYS:-3}
       GENERATED_IMAGE_CLEANUP_INTERVAL_HOURS: ${GENERATED_IMAGE_CLEANUP_INTERVAL_HOURS:-24}
       GENERATED_IMAGE_CLEANUP_RUN_ON_START: ${GENERATED_IMAGE_CLEANUP_RUN_ON_START:-true}
+      GENERATED_IMAGE_CLEANUP_DRY_RUN: ${GENERATED_IMAGE_CLEANUP_DRY_RUN:-false}
     volumes:
       - ./generated-images:/app/generated-images
